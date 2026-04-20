@@ -1,0 +1,30 @@
+.DS_Store
+
+# Large/reference source materials not needed on GitHub
+papers/
+examples/
+pdf_text_cache/
+paper_summaries/
+obsidian_vault/
+docs/literature/
+docs/proposal/IPP_example结构整理.md
+docs/proposal/Proposal引用与补文献规划.md
+文献索引与分类总览.md
+
+# PDF and generated document outputs
+*.pdf
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+
+# Python/cache/editor noise
+__pycache__/
+*.pyc
+.pytest_cache/
+.vscode/
+.idea/

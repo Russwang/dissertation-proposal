@@ -1,0 +1,314 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{pgfgantt}
+
+\title{Transforming and Merging Vector Indices for Unified Retrieval in MetricDB}
+\author{Russ Wang}
+\date{April 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Vector databases are now widely used in semantic retrieval, information extraction, recommendation, and generative AI systems. Most of them are built around one embedding model, so vectors produced by different models cannot usually be compared or queried together directly. MetricDB addresses this limitation by moving from model-specific vector spaces to a shared metric view for unified retrieval across embedding models.
+
+This proposal focuses on the indexing problem after vector databases have been aligned or transformed into a shared space. The simple baseline discards existing local indices and rebuilds a new HNSW index over the aligned and unioned vector set. This baseline is important, but it is also limited because it ignores index structures that may already exist inside the original vector databases. It can also require repeated full reconstruction when new databases are integrated.
+
+The main focus is index reuse. The project starts from local vector indices that were built before alignment, especially HNSW indices over separate vector subsets. It studies how to transform, repair, and merge these indices into a valid vector index over the union of transformed vectors. HNSW will be the primary case study, and FAISS will be considered as the preferred implementation backend. The proposed method will be evaluated against brute-force search and an HNSW rebuild baseline. The expected outcome is a prototype, an evaluation of retrieval quality and system cost, and an analysis of when index reuse is preferable to rebuilding from scratch.
+\end{abstract}
+
+\section{Motivation}
+
+Vector databases have become an important part of modern data systems. Semantic search, document question answering, recommendation, and multimodal information management increasingly rely on embedding vectors to represent similarity. FAISS shows how similarity search can scale to large vector collections \cite{johnson2017faiss}. Lucene-based vector search shows how vector retrieval can fit into mature search infrastructure \cite{lin2023lucene}, and predicate-aware vector search shows how vector similarity can be combined with structured filtering \cite{patel2024acorn}.
+
+Current vector databases still have a basic limitation: each database is usually built around one embedding model. Vectors from different models therefore live in separate spaces and cannot be compared directly. Prior work on cross-space alignment shows that different embedding spaces can sometimes be related through learned mappings \cite{conneau2018word}. Work on representation convergence gives a broader reason to expect shared structure across embedding spaces \cite{huh2024platonic}. MetricDB studies this problem in the database setting by asking how vector databases built over different embedding models can be integrated under a shared metric view \cite{yang2025integrating}.
+
+Once vectors can be transformed into a shared space, a second problem appears. A system can form an aligned and unioned vector set and rebuild a new vector index. This is the natural baseline. However, real vector databases may already have local indices over their original vectors. Discarding these indices may be wasteful, especially when databases are large, added incrementally, or updated independently. This proposal therefore asks whether local vector indices can be reused after alignment.
+
+\section{Background and Corresponding Work}
+
+\subsection{Vector Indices and ANN Search}
+
+HNSW is a graph-based approximate nearest-neighbour index. It uses a navigable small-world graph to support efficient search in high-dimensional vector spaces \cite{malkov2018hnsw}. FAISS provides a widely used framework for large-scale similarity search, including HNSW, IVF, and product-quantization-based indices \cite{johnson2017faiss}. These systems are strong foundations for single-space vector search, where an index is normally built directly over one vector collection.
+
+IVF is also relevant because it is a partition-based route to approximate search. This project will focus on HNSW because graph links make the conversion and merging problem concrete. Local neighbourhood edges can be preserved, tested, repaired, or connected across databases. IVF will be treated as related work and a possible future extension rather than a required implementation target.
+
+\subsection{Vector Databases, Filtering, and System Integration}
+
+Modern vector retrieval systems rarely run as isolated nearest-neighbour algorithms. Lucene-based vector search shows how vector search can be integrated into mature search infrastructure \cite{lin2023lucene}. ACORN studies efficient search when vector similarity is combined with structured predicates \cite{patel2024acorn}. This matters for MetricDB because the index module must eventually serve a larger query flow, not only a standalone benchmark.
+
+\subsection{Embedding Alignment and MetricDB}
+
+The project assumes that upstream components or existing alignment methods can provide transformations into a shared space. Unsupervised word translation shows that embedding spaces can be aligned without parallel data \cite{conneau2018word}. The Platonic Representation Hypothesis gives a broader motivation for why different representation spaces may share structure \cite{huh2024platonic}. MetricDB directly studies vector database integration across embedding models and provides the main context for this proposal \cite{yang2025integrating}.
+
+\subsection{Metric-Space and Graph-Based Indexing}
+
+This proposal uses the term \emph{vector index} for concrete ANN structures such as HNSW and IVF. It is also related to broader metric-space indexing. Classic work on searching in metric spaces gives the general background for similarity search under distance functions \cite{chavez2001searching}. Later work studies exact metric-space indexing, pivot selection, learned metric indices, graph-based methods, and distributed metric indices \cite{chen2022indexing,zhu2022pivot,tian2022lims,antol2021learned,shimomura2021survey,zhu2024dims}. Together, these works show that indexing under a shared distance space is a real research problem. The specific contribution here is narrower: reusing and merging local vector indices after alignment.
+
+The next section turns this motivation into a concrete problem definition.
+
+\section{Problem Definition}
+
+\subsection{Core Problem}
+
+This project studies the following problem:
+
+\begin{quote}
+Given multiple vector databases, assume their embedding vectors can be transformed into a shared space. Each database may already have a local vector index, such as an HNSW or IVF index. How can these local indices be transformed, repaired, and merged into a valid vector index over the union of transformed vectors?
+\end{quote}
+
+To keep the implementation bounded, HNSW will be the primary implementation target.
+
+The baseline is simple: transform all vectors into the shared space, form the aligned and unioned vector set, and call an off-the-shelf HNSW implementation to rebuild a new index from scratch. This baseline is important because it gives the retrieval quality and query performance of a fully rebuilt index. The proposed research asks whether a reuse-based route can approach that quality while reducing construction or integration cost.
+
+In this proposal, a \emph{valid union-level vector index} has three requirements. It supports nearest-neighbour search over all transformed vectors, returns globally meaningful item identifiers, and can be evaluated against brute-force ground truth and the HNSW rebuild baseline. For the prototype, validity will be assessed empirically through union-level search behaviour, recall@\textit{k}, query latency, construction or merge cost, and retrieval across the original vector subsets.
+
+\subsection{Inputs, Outputs, and Constraints}
+
+From a systems perspective, the project can be summarized as follows:
+
+\begin{itemize}
+\item \textbf{Inputs:} original vector subsets, transformations into a shared space, existing local HNSW indices or HNSW-derived neighbourhood structures, and optional anchor or alignment information from upstream modules.
+\item \textbf{Baseline output:} an HNSW index rebuilt directly over the aligned and unioned vector set.
+\item \textbf{Proposed output:} a union-level vector index produced by converting, repairing, and merging local index structures.
+\item \textbf{Constraints:} compatibility with the MetricDB code skeleton, realistic implementation within the project period, and evaluation of retrieval quality, construction cost, and query cost.
+\end{itemize}
+
+\subsection{Research Scope and Module Responsibility}
+
+Within MetricDB, this project is responsible for the indexing layer rather than the full cross-database alignment pipeline. It assumes that transformations, alignment results, or anchors are provided by upstream components, existing methods, or controlled synthetic experiments. The main responsibility is to study how the indexing layer should use those inputs.
+
+This scope aligns with the current \texttt{metricdb} skeleton. The indexing module is expected to expose \texttt{build} and \texttt{search} behaviour through the shared index interface and return candidate item identifiers for downstream search modules. The project will keep this interface in view, but the research contribution is not merely to wrap an existing HNSW library. The central contribution is the conversion, repair, and merging of local index structures after transformation.
+
+\section{Research Goals and Research Questions}
+
+\subsection{Research Goals}
+
+The overall goal is to design and evaluate a reuse-based vector indexing method for MetricDB. Instead of treating the aligned and unioned vector set only as a fresh dataset, the project studies whether local index structures from the original vector databases can be carried forward into the shared space.
+
+The project will pursue the following concrete goals:
+
+\begin{enumerate}
+\item establish an HNSW rebuild baseline over the aligned and unioned vector set
+\item investigate how local HNSW neighbourhood structures behave after vector transformation
+\item design a conversion and repair strategy for local graph links in the transformed space
+\item design a merge strategy that adds cross-index links between local structures
+\item implement a prototype using HNSW as the primary case study and FAISS as the preferred backend
+\item evaluate the proposed method against brute-force search and the HNSW rebuild baseline
+\end{enumerate}
+
+\subsection{Research Questions}
+
+The project is built around the following research questions:
+
+\begin{enumerate}
+\item How much of a local HNSW neighbourhood structure remains useful after its vectors are transformed into a shared space?
+\item How can transformed local links be repaired when they no longer represent good neighbours in the shared space?
+\item How should cross-index links be added so that separate local structures become searchable as one union-level index?
+\item Compared with rebuilding HNSW from scratch over the aligned and unioned vector set, what quality and cost trade-offs does the reuse-based method provide?
+\end{enumerate}
+
+\section{Timeliness, Significance, Feasibility, and Beneficiaries}
+
+\subsection{Timeliness and Novelty}
+
+This project is timely because vector databases are becoming standard infrastructure, while multi-model and multi-source embeddings are also becoming more common. Existing vector search systems are mature, but they usually assume a single vector space and a single index over one collection. MetricDB changes this setting by making cross-embedding retrieval explicit. Under this setting, the novel question is not simply how to build another vector index. The question is how to reuse and merge existing local indices after their vectors have been transformed.
+
+\subsection{Significance}
+
+The significance of this project lies in the gap between integration and indexing. Alignment can make vectors comparable, but it does not by itself provide an efficient index over the union of transformed vectors. Rebuilding an index is the obvious baseline. A reuse-based method may be more attractive when vector databases already maintain local indices or when new databases need to be integrated incrementally.
+
+\subsection{Feasibility}
+
+The project is feasible for three reasons. It has a clear baseline, focuses on one primary index structure, and has a bounded implementation target. HNSW provides a concrete graph-based object for studying conversion and merging \cite{malkov2018hnsw}. FAISS will be investigated as the preferred backend because it supports HNSW-based indexing and may provide useful graph-level structures or search functionality for this project \cite{johnson2017faiss}. If direct graph-level manipulation is too complex, the prototype will use an HNSW-derived neighbourhood graph. This graph can be built from local index queries and used to evaluate conversion, repair, and merging.
+
+\subsection{Beneficiaries}
+
+The direct beneficiaries are researchers and developers working on MetricDB and cross-embedding retrieval. More broadly, the project may help developers of enterprise search, multimodal retrieval, and multi-model vector database systems reason about when local indices can be reused and when full rebuilding is the better engineering choice.
+
+\section{Methodology}
+
+\subsection{Overall Approach}
+
+The project will follow a baseline-plus-proposed-method structure. The baseline rebuilds an HNSW index over the aligned and unioned vector set. The proposed method starts from local HNSW indices or HNSW-derived neighbourhood structures built on the original vector subsets. It then transforms the vectors into the shared space, repairs local graph links, and adds cross-index links. The result is a union-level searchable structure.
+
+\subsection{Baseline: HNSW Rebuild over the Unioned Vector Set}
+
+The baseline will first apply the available transformations to each vector subset and then concatenate the transformed vectors into one aligned and unioned vector set. A standard HNSW implementation will build a new index over this full set. This route ignores the original local indices, but it provides a strong comparison point for recall, query latency, build time, and memory or graph size.
+
+\subsection{Proposed Method: Convert, Repair, and Merge}
+
+The proposed method is organised around three steps.
+
+\begin{enumerate}
+\item \textbf{Convert.} Each local index is moved into the shared space by applying the corresponding transformation to its vectors. The local neighbourhood structure is kept as the initial graph representation.
+\item \textbf{Repair.} Local graph links are re-evaluated in the transformed space. Links that still connect close neighbours can be retained, while weak or distorted links can be replaced using local candidate search in the transformed vectors.
+\item \textbf{Merge.} Cross-index links are added between local structures so that search can move across vector subsets. Candidate cross links may come from anchors, sampled cross-neighbour searches, or nearest neighbours across transformed subsets.
+\end{enumerate}
+
+The expected result is a union-level graph-based vector index whose behaviour can be directly evaluated. It should search over the transformed vector union, return global item identifiers, support cross-subset retrieval, and be compared fairly with the HNSW rebuild baseline in retrieval quality and construction cost.
+
+\subsection{Implementation Procedure}
+
+The prototype will make the convert-repair-merge method operational through six steps.
+
+\begin{enumerate}
+\item \textbf{Prepare transformed vectors.} For each vector subset \(D_i\), the prototype will apply the available transformation \(T_i\) to map its vectors into the shared space. Each vector will also be assigned a global item identifier.
+\item \textbf{Obtain local HNSW graph information.} The preferred route is to reuse graph links exposed by the local HNSW backend. If this route is not practical, the project will investigate whether FAISS provides a Python-level way to access useful HNSW graph information. If direct graph manipulation is too costly, the prototype will query each existing local HNSW index for neighbours of its own vectors and use the results to build an HNSW-derived local neighbourhood graph.
+\item \textbf{Convert local graphs.} The local graph topology will be carried into the shared space together with the transformed vectors. Local node identifiers will be mapped to global item identifiers. At this stage, the graph still contains only within-subset links.
+\item \textbf{Repair within-subset links.} Existing links will be re-evaluated using distances or ranks in the transformed space. Weak or distorted links are links that no longer connect close neighbours after transformation. These links can be removed, deprioritised, or replaced using candidate neighbours from the same transformed subset.
+\item \textbf{Add cross-subset links.} The prototype will add links between different local graphs. Candidate cross-subset links may come from anchors, sampled nodes, or nearest-neighbour search across transformed subsets. These links allow search to move from one original database to another.
+\item \textbf{Search the merged structure.} A query will be represented in the shared space and searched over the merged graph. The search will traverse repaired local links and cross-subset links, then return global item identifiers.
+\end{enumerate}
+
+This procedure does not assume that the merged graph must always outperform a fully rebuilt HNSW index. Instead, it provides a concrete way to study the trade-off between retrieval quality and construction or integration cost.
+
+\subsection{Implementation Backend}
+
+HNSW will be the primary case study because it exposes index reuse as a graph problem. FAISS will be investigated as the preferred implementation backend because it supports standard HNSW rebuilding and may provide graph-level structures or search functionality for the proposed method. If the available FAISS interface is not sufficient for direct graph-level manipulation, the project will construct an HNSW-derived neighbourhood graph by querying local indices. This graph will then be used to evaluate conversion, repair, and merging.
+
+\subsection{System Integration}
+
+The prototype will remain compatible with the MetricDB indexing boundary. Search results should be returned as global item identifiers so that downstream query or predicate modules can consume them. The project will not require the full completion of the union-management or entity-linking modules. Instead, it will treat transformations and optional anchors as inputs and focus on the index-level integration problem.
+
+\subsection{Risks and Mitigation}
+
+The main risks are as follows.
+
+\begin{enumerate}
+\item \textbf{Graph-level API risk.} Some HNSW libraries expose build and query operations but not direct graph editing. The mitigation is to prefer FAISS and keep an HNSW-derived neighbourhood graph representation as a fallback.
+\item \textbf{Overly broad index scope.} HNSW and IVF are both relevant. Implementing both would make the project too broad. The mitigation is to implement HNSW and discuss IVF as related work and future extension.
+\item \textbf{Alignment dependency.} The project depends on transformed vectors, but it does not implement the full alignment pipeline. The mitigation is to assume upstream transformations or use controlled synthetic transformations for evaluation.
+\item \textbf{Quality-cost trade-off.} A merged graph may be cheaper to construct but lower in recall. The mitigation is to evaluate both quality and cost against the HNSW rebuild baseline.
+\end{enumerate}
+
+\section{Evaluation Plan}
+
+The evaluation will compare three routes.
+
+\begin{enumerate}
+\item \textbf{Brute-force search} over the transformed vector union, used as ground truth for nearest-neighbour quality.
+\item \textbf{HNSW rebuild baseline} over the aligned and unioned vector set, used as the main practical baseline.
+\item \textbf{Proposed merged method} produced by converting, repairing, and merging local HNSW or HNSW-derived structures.
+\end{enumerate}
+
+\subsection{Retrieval Quality}
+
+Retrieval quality will be measured using top-\textit{k} agreement or recall@\textit{k} against brute-force ground truth. The comparison with the HNSW rebuild baseline will show whether reuse loses retrieval quality. The evaluation will also check cross-subset retrieval, because a union-level index should retrieve neighbours across the original vector subsets.
+
+\subsection{System Cost}
+
+System cost will focus on build time versus merge time, query latency, and index size or graph size where practical. The central comparison has two parts. First, can the merged method search correctly? Second, does it offer a meaningful construction or integration-cost advantage over rebuilding HNSW on the full aligned and unioned vector set?
+
+\subsection{Ablation and Sensitivity}
+
+If time allows, the project will include small ablations for repair and cross-link strategies. For example, the evaluation may compare three variants: local links without repair, repaired local links without cross-index links, and the full convert-repair-merge pipeline. These ablations will help explain which part of the proposed method contributes most to retrieval quality.
+
+\section{Expected Outcomes}
+
+The expected outcomes of this project are:
+
+\begin{enumerate}
+\item an HNSW rebuild baseline over aligned and unioned transformed vectors
+\item a prototype for HNSW index conversion, repair, and merging
+\item an evaluation comparing brute-force search, rebuild baseline, and the proposed merged method
+\item an analysis of when local index reuse is beneficial and when full rebuilding remains preferable
+\item a dissertation/report foundation covering method, experiments, limitations, and future extensions such as IVF
+\end{enumerate}
+
+\section{Timeline, Milestones, and Deliverables}
+
+This proposal will be completed before the formal project execution begins. The following ten-week plan describes the implementation period after the proposal has been agreed.
+
+\begin{center}
+\begin{ganttchart}[
+    x unit=0.7cm,
+    y unit title=0.4cm,
+    y unit chart=0.55cm,
+    vgrid,
+    hgrid,
+    title height=1,
+    bar/.append style={fill=gray!35},
+    bar label font=\small,
+    milestone label font=\small
+]{1}{10}
+\gantttitle{Weeks}{10} \\
+\gantttitlelist{1,...,10}{1} \\
+\ganttbar{Phase 1: Baseline and Backend Study}{1}{2} \\
+\ganttbar{Phase 2: Convert and Repair Prototype}{3}{4} \\
+\ganttbar{Phase 3: Merge Prototype and Integration}{5}{6} \\
+\ganttbar{Phase 4: Evaluation}{7}{8} \\
+\ganttbar{Phase 5: Writing and Consolidation}{9}{10}
+\end{ganttchart}
+\end{center}
+
+\subsection{Phase 1: Baseline and Backend Study (Weeks 1--2)}
+
+The first phase will set up transformed-vector test data, implement the HNSW rebuild baseline, confirm the FAISS or HNSW backend route, and define the exact evaluation metrics.
+
+\textbf{Deliverables}
+\begin{itemize}
+\item HNSW rebuild baseline over the aligned and unioned vector set
+\item confirmed backend choice and graph-representation plan
+\item brute-force ground truth setup
+\item experimental protocol for recall, latency, and construction cost
+\end{itemize}
+
+\subsection{Phase 2: Convert and Repair Prototype (Weeks 3--4)}
+
+The second phase will construct local HNSW or HNSW-derived neighbourhood structures, transform vectors into the shared space, and implement the first repair strategy for local graph links.
+
+\textbf{Deliverables}
+\begin{itemize}
+\item local index conversion procedure
+\item transformed-space link evaluation
+\item initial repair strategy and diagnostic results
+\end{itemize}
+
+\subsection{Phase 3: Merge Prototype and Integration (Weeks 5--6)}
+
+The third phase will add cross-index links and implement union-level graph search over the merged structure. It will also align the output identifiers with the MetricDB indexing interface.
+
+\textbf{Deliverables}
+\begin{itemize}
+\item cross-index link construction method
+\item union-level merged graph prototype
+\item search output using global item identifiers
+\end{itemize}
+
+\subsection{Phase 4: Evaluation (Weeks 7--8)}
+
+The fourth phase will compare brute-force search, HNSW rebuild, and the proposed merged method. The focus will be recall@\textit{k}, query latency, construction or merge time, and graph or index size.
+
+\textbf{Deliverables}
+\begin{itemize}
+\item retrieval-quality results
+\item build-versus-merge cost results
+\item analysis of cross-database retrieval behaviour
+\item optional ablation results for repair and cross-link choices
+\end{itemize}
+
+\subsection{Phase 5: Dissertation Writing and Final Consolidation (Weeks 9--10)}
+
+The final phase will consolidate results, prepare figures and tables, and write the dissertation/report sections on background, methodology, evaluation, limitations, and future extensions.
+
+\textbf{Deliverables}
+\begin{itemize}
+\item draft dissertation/report chapters
+\item final result figures and tables
+\item final project materials aligned with the proposal
+\end{itemize}
+
+\section{Conclusion}
+
+This project studies how to transform and merge existing local vector indices for unified retrieval in MetricDB. The baseline is to rebuild HNSW from scratch over the aligned and unioned vector set. The main research contribution is to convert, repair, and connect local HNSW index structures after vector transformation. The result should be a valid vector index over the union of transformed vectors. The evaluation will compare retrieval quality and system cost against brute-force search and the HNSW rebuild baseline. This comparison will clarify when index reuse is practical and when full rebuilding remains the better choice.
+
+\bibliographystyle{unsrt}
+\bibliography{references}
+
+\end{document}
